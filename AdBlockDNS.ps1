@@ -1,17 +1,18 @@
 <#
     .SYNOPSIS
-    System DNS & Hosts AdBlocker
+    System Security & Telemetry Manager
 
     .DESCRIPTION
-    A lightweight, GUI-based tool to manage system DNS settings and block ads/trackers.
+    A lightweight, GUI-based tool to manage system DNS settings and block telemetry.
 
     Features:
     - Smart Merge: Preserves user's existing custom entries in the hosts file.
     - Backup System: Automatically creates backups before modification.
     - Theme Engine: Auto-detects System Light/Dark mode (Apps & System).
     - Zero Dependencies: Runs purely on PowerShell + .NET (WPF).
-    Fixes:
-    - Improved detection logic to distinguish between Static DNS and DHCP-assigned DNS.
+    Fixes & Optimizations:
+    - Pure .NET File I/O for zero UI freezing.
+    - Lightweight Telemetry-only blocking to prevent Windows Dnscache crashes.
     - Applies settings to all physical network adapters (Ethernet & Wi-Fi) simultaneously.
 
     .AUTHOR
@@ -78,9 +79,8 @@ if ([Environment]::Is64BitOperatingSystem -and [IntPtr]::Size -eq 4) {
 }
 
 $script:HostsBackupPath = "$($script:HostsPath).bak"
-# Unique tags to identify the block managed by this tool
-$script:BlockStartTag = "# [AdBlockDNS-Blocklist-Start] - DO NOT EDIT THIS BLOCK"
-$script:BlockEndTag   = "# [AdBlockDNS-Blocklist-End]"
+$script:BlockStartTag = "# [TelemetryBlocker-Start] - DO NOT EDIT THIS BLOCK"
+$script:BlockEndTag   = "# [TelemetryBlocker-End]"
 
 # DNS Providers (OrderedDictionary)
 $script:DNSProviders = [ordered]@{
@@ -93,11 +93,9 @@ $script:DNSProviders = [ordered]@{
     "Control-D"        = "76.76.2.2,76.76.10.2"
 }
 
-# Sources for AdBlocking hosts files
+# Focused only on Telemetry/Spyware to keep the list lightweight for Windows Dnscache
 $script:AdBlockSources = @(
-    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-    "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
-    "https://adaway.org/hosts.txt"
+    "https://raw.githubusercontent.com/crazy-max/WindowsSpyBlocker/master/data/hosts/spy.txt"
 )
 
 # =========================================================
@@ -120,9 +118,7 @@ function Get-SystemTheme {
             return "Dark"
         }
         return "Dark"
-    } catch {
-        return "Dark"
-    }
+    } catch { return "Dark" }
 }
 
 $CurrentTheme = Get-SystemTheme
@@ -149,9 +145,9 @@ $ThemeObj = $Themes[$CurrentTheme]
 [xml]$Xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DNS &amp; AdBlock Manager"
+        Title="System Security Manager"
         SizeToContent="Height"
-        Width="400"
+        Width="420"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanMinimize"
         WindowStyle="SingleBorderWindow"
@@ -290,7 +286,7 @@ $ThemeObj = $Themes[$CurrentTheme]
                 <StackPanel>
                     <Grid Margin="0,0,0,5">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="Hosts AdBlocker" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" FontSize="14" VerticalAlignment="Center"/>
+                        <TextBlock Text="Telemetry Blocker via Hosts" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" FontSize="14" VerticalAlignment="Center"/>
                         <CheckBox Name="ToggleHosts" Grid.Column="1" Style="{StaticResource ToggleSwitch}"/>
                     </Grid>
                     <TextBlock Name="StatusHosts" Text="Status: Checking..." FontSize="12" Foreground="{DynamicResource SubTextBrush}"/>
@@ -300,7 +296,7 @@ $ThemeObj = $Themes[$CurrentTheme]
                                 <Viewbox Width="14" Height="14" Margin="0,0,8,0">
                                     <Path Fill="{DynamicResource TextBrush}" Data="M5,20h14v-2H5V20z M19,9h-4V3H9v6H5l7,7L19,9z"/>
                                 </Viewbox>
-                                <TextBlock Text="Update Hosts Database"/>
+                                <TextBlock Text="Update Telemetry Database"/>
                             </StackPanel>
                         </Button>
                         <ProgressBar Name="ProgressHosts" Height="4" Margin="0,10,0,0" Visibility="Hidden" IsIndeterminate="True" Foreground="{DynamicResource AccentBrush}" Background="{DynamicResource BorderBrush}" BorderThickness="0"/>
@@ -389,13 +385,15 @@ $ComboDNS.SelectedIndex = 0
 # 8. CORE LOGIC (HOSTS MANAGEMENT)
 # =========================================================
 
-# Helper: Unprotect the file (remove System/Hidden attributes) to avoid access errors
+# Helper: Native .NET attribute handling
 $script:UnprotectFile = {
     param($Path)
-    if (Test-Path $Path) {
+    if ([System.IO.File]::Exists($Path)) {
         try {
-            # Use CMD's attrib for reliability on system files
-            Start-Process -FilePath "cmd.exe" -ArgumentList "/c attrib -s -h -r `"$Path`"" -WindowStyle Hidden -Wait
+            $fileInfo = New-Object System.IO.FileInfo($Path)
+            if ($fileInfo.IsReadOnly) {
+                $fileInfo.IsReadOnly = $false
+            }
         } catch {}
     }
 }
@@ -404,18 +402,24 @@ $script:GetCleanHostsContent = {
     # Ensure we can access the file
     & $script:UnprotectFile -Path $script:HostsPath
 
-    # Check for backup
-    if (-not (Test-Path $script:HostsBackupPath)) {
-        try { Copy-Item $script:HostsPath $script:HostsBackupPath -Force -ErrorAction SilentlyContinue } catch {}
+    # Check for backup using pure .NET
+    if (-not [System.IO.File]::Exists($script:HostsBackupPath)) {
+        try { [System.IO.File]::Copy($script:HostsPath, $script:HostsBackupPath, $true) } catch {}
     }
 
-    if (Test-Path $script:HostsPath) {
+    if ([System.IO.File]::Exists($script:HostsPath)) {
         try {
-            $content = Get-Content $script:HostsPath -Raw -ErrorAction SilentlyContinue
+            $content = [System.IO.File]::ReadAllText($script:HostsPath)
             if ($null -ne $content) {
-                $pattern = "(?s)\s*" + [Regex]::Escape($script:BlockStartTag) + ".*?" + [Regex]::Escape($script:BlockEndTag)
-                $cleanContent = $content -replace $pattern, ""
-                return $cleanContent.Trim()
+                $startIndex = $content.IndexOf($script:BlockStartTag)
+                $endIndex = $content.IndexOf($script:BlockEndTag)
+
+                if ($startIndex -ge 0 -and $endIndex -gt $startIndex) {
+                    $endTagLength = $script:BlockEndTag.Length
+                    $cleanContent = $content.Remove($startIndex, ($endIndex - $startIndex) + $endTagLength)
+                    return $cleanContent.Trim()
+                }
+                return $content.Trim()
             }
         } catch {}
     }
@@ -427,10 +431,10 @@ $script:RunHostsUpdate = {
 
     $ProgressHosts.Visibility = "Visible"
     if (!$Silent) {
-        $TxtGlobalStatus.Text = "Updating Hosts database..."
+        $TxtGlobalStatus.Text = "Updating Telemetry database..."
         $TxtGlobalStatus.Foreground = $Res["SubTextBrush"]
     }
-    $TxtUpdateInfo.Text = "Downloading lists..."
+    $TxtUpdateInfo.Text = "Downloading list..."
     $BtnUpdate.IsEnabled = $false
     $ToggleHosts.IsEnabled = $false
 
@@ -443,32 +447,40 @@ $script:RunHostsUpdate = {
         $WebClient = New-Object System.Net.WebClient
         $WebClient.Encoding = [System.Text.Encoding]::UTF8
 
+        $uniqueHosts = New-Object System.Collections.Generic.HashSet[string]
         foreach ($url in $script:AdBlockSources) {
             try {
                 $content = $WebClient.DownloadString($url)
-                $lines = $content -split "`n" | Where-Object {
-                    ($_ -notmatch "^\s*#") -and ($_ -match "0\.0\.0\.0|127\.0\.0\.1")
+                $lines = $content -split "`n"
+                foreach ($line in $lines) {
+                    $trimmedLine = $line.Trim()
+                    if ($trimmedLine -notmatch "^\s*#" -and $trimmedLine -match "^(0\.0\.0\.0|127\.0\.0\.1)\s+(.+)") {
+                        $domain = $matches[2].Trim()
+                        [void]$uniqueHosts.Add("0.0.0.0 $domain")
+                    }
                 }
-                $newBlock += ($lines -join "`r`n") + "`r`n"
             } catch { }
         }
+        $newBlock += ($uniqueHosts -join "`r`n") + "`r`n"
         $newBlock += $script:BlockEndTag
 
         # Ensure write access again before saving
         & $script:UnprotectFile -Path $script:HostsPath
-        $finalContent = $userContent + $newBlock
-        Set-Content -Path $script:HostsPath -Value $finalContent -Force
+        $finalContent = $userContent + "`r`n" + $newBlock
+
+        # Native .NET write
+        [System.IO.File]::WriteAllText($script:HostsPath, $finalContent)
 
         if (!$Silent) {
-            $TxtGlobalStatus.Text = "Hosts updated successfully."
+            $TxtGlobalStatus.Text = "Telemetry list updated successfully."
             $TxtGlobalStatus.Foreground = $Res["GreenBrush"]
         }
 
-        $TxtUpdateInfo.Text = "Hosts are up to date! (Just Now)"
+        $TxtUpdateInfo.Text = "Database is up to date! (Just Now)"
         $TxtUpdateInfo.Foreground = $Res["GreenBrush"]
     }
     catch {
-        $TxtGlobalStatus.Text = "Hosts Update Failed."
+        $TxtGlobalStatus.Text = "Telemetry Update Failed."
         $TxtGlobalStatus.Foreground = $Res["RedBrush"]
         $TxtUpdateInfo.Text = "Error: $($_.Exception.Message)"
         $TxtUpdateInfo.Foreground = $Res["RedBrush"]
@@ -538,8 +550,8 @@ $Window.Add_Loaded({
         # Ensure we can read it to check status
         & $script:UnprotectFile -Path $script:HostsPath
 
-        if (Test-Path $script:HostsPath) {
-            $hContent = Get-Content $script:HostsPath -Raw -ErrorAction SilentlyContinue
+        if ([System.IO.File]::Exists($script:HostsPath)) {
+            $hContent = [System.IO.File]::ReadAllText($script:HostsPath)
 
             if ($hContent -match [Regex]::Escape($script:BlockStartTag)) {
                 $ToggleHosts.IsChecked = $true
@@ -548,7 +560,7 @@ $Window.Add_Loaded({
                 $PanelHosts.Visibility = "Visible"
 
                 try {
-                    $lastWrite = (Get-Item $script:HostsPath).LastWriteTime
+                    $lastWrite = [System.IO.File]::GetLastWriteTime($script:HostsPath)
                     $TxtUpdateInfo.Text = "Last updated: $($lastWrite.ToString('dd/MM/yyyy'))"
                 } catch {}
             } else {
@@ -631,18 +643,18 @@ $BtnSave.Add_Click({
         $StatusDNS.Foreground = $Res["SubTextBrush"]
     }
 
-    # 2. Apply Hosts
+    # 2. Apply Hosts (Using Pure .NET File I/O)
     if (-not $ToggleHosts.IsChecked) {
         try {
             & $script:UnprotectFile -Path $script:HostsPath
             & $script:UnprotectFile -Path $script:HostsBackupPath
 
-            if (Test-Path $script:HostsBackupPath) {
-                Copy-Item $script:HostsBackupPath $script:HostsPath -Force -ErrorAction SilentlyContinue
+            if ([System.IO.File]::Exists($script:HostsBackupPath)) {
+                [System.IO.File]::Copy($script:HostsBackupPath, $script:HostsPath, $true)
             }
             else {
                 $clean = & $script:GetCleanHostsContent
-                Set-Content -Path $script:HostsPath -Value $clean -Force
+                [System.IO.File]::WriteAllText($script:HostsPath, $clean)
             }
             $StatusHosts.Text = "Status: Inactive (Restored)"
             $StatusHosts.Foreground = $Res["SubTextBrush"]
@@ -650,7 +662,7 @@ $BtnSave.Add_Click({
     }
 
     Start-Sleep -Milliseconds 500
-    ipconfig /flushdns | Out-Null
+    Start-Process -FilePath "ipconfig" -ArgumentList "/flushdns" -WindowStyle Hidden
 
     $TxtGlobalStatus.Text = "Configuration applied successfully."
     $TxtGlobalStatus.Foreground = $Res["GreenBrush"]
